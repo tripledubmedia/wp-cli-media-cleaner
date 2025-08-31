@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Media Cleaner CLI
  * Description:       A WP-CLI command to find and clean up unused media and media with broken file links. This plugin was developed with the assistance of Gemini.
- * Version:           1.0.0
+ * Version:           1.0.3
  * Author:            Triple Dub
  * Author URI:        https://tripledub.media
  * License:           GPL-2.0-or-later
@@ -179,6 +179,9 @@ class Media_Cleaner_Command {
 
         $question = "Indicate the locations to search, separated by commas (e.g., 1,2,3,6):";
         
+        // Force flush the output buffer before readline
+        fflush(STDOUT);
+
         while(true) {
             $input = readline($question . " ");
             $input = trim($input);
@@ -221,7 +224,7 @@ class Media_Cleaner_Command {
         global $wpdb;
 
         $this->initialize_log_file();
-        $this->log_to_csv( ['Attachment ID', 'File Name', 'Status', 'Action Taken', 'Timestamp'] );
+        $this->log_to_csv( ['Attachment ID', 'File Name', 'Upload Folder', 'Status', 'Action Taken', 'Timestamp'] );
 
         if ( $is_dry_run ) {
             WP_CLI::line( "\nStarting analysis in --dry-run mode. NO files will be deleted." );
@@ -241,38 +244,43 @@ class Media_Cleaner_Command {
 
         WP_CLI::line( "Found {$total_attachments} media attachments to analyze." );
         WP_CLI::line( "\nStep 2/2: Analyzing media usage..." );
+        
+        // Force flush the output buffer before the progress bar
+        fflush(STDOUT);
 
         $progress = \WP_CLI\Utils\make_progress_bar( 'Analyzing media', $total_attachments );
 
         $unused_media = [];
         $broken_link_media = [];
         $kept_media_count = 0;
+        
+        $upload_dir_info = wp_upload_dir();
+        $upload_base_dir = $upload_dir_info['basedir'];
 
         foreach ( $attachment_ids as $id ) {
-            // Check for file existence first
             $file_path = get_attached_file( $id );
             $file_name = basename( $file_path );
-            
+            $relative_path = $file_path ? str_replace( $upload_base_dir, '', $file_path ) : '';
+            $upload_folder = $relative_path ? ltrim( dirname( $relative_path ), '/' ) : '';
+
             if ( ! $file_path || ! file_exists( $file_path ) ) {
                 $broken_link_media[] = $id;
                 $action = $is_dry_run ? 'Skipped (Dry Run)' : 'To Be Deleted';
-                $this->log_to_csv( [$id, $file_name, 'Broken Link', $action, date('Y-m-d H:i:s')] );
+                $this->log_to_csv( [$id, $file_name, $upload_folder, 'Broken Link', $action, date('Y-m-d H:i:s')] );
             } else {
-                // If file exists, check for usage
                 if ( $this->is_media_used( $id, $file_path ) ) {
                     $kept_media_count++;
-                    $this->log_to_csv( [$id, $file_name, 'Used', 'Kept', date('Y-m-d H:i:s')] );
+                    $this->log_to_csv( [$id, $file_name, $upload_folder, 'Used', 'Kept', date('Y-m-d H:i:s')] );
                 } else {
                     $unused_media[] = $id;
                     $action = $is_dry_run ? 'Skipped (Dry Run)' : 'To Be Deleted';
-                    $this->log_to_csv( [$id, $file_name, 'Unused', 'action', date('Y-m-d H:i:s')] );
+                    $this->log_to_csv( [$id, $file_name, $upload_folder, 'Unused', 'action', date('Y-m-d H:i:s')] );
                 }
             }
             $progress->tick();
         }
         $progress->finish();
 
-        // --- Create Cache File ---
         $cache_file_path = $this->cache_dir . '/media-cleaner-cache-' . date('Y-m-d-His') . '.json';
         $cache_data = [
             'unused_media' => $unused_media,
@@ -280,7 +288,6 @@ class Media_Cleaner_Command {
         ];
         file_put_contents( $cache_file_path, json_encode( $cache_data, JSON_PRETTY_PRINT ) );
         
-        // --- Display Summary ---
         WP_CLI::line( "\n-------------------------------" );
         WP_CLI::success( $is_dry_run ? "Dry Run Complete!" : "Scan Complete!" );
         WP_CLI::line( "-------------------------------" );
@@ -294,7 +301,6 @@ class Media_Cleaner_Command {
         if ( $is_dry_run ) {
             WP_CLI::line( "\nTo delete these files, run `wp media-cleaner cleanup` and confirm you want to use this cache file." );
         } else {
-            // If it's not a dry run, we ask for confirmation to delete immediately
             $total_to_delete = count($unused_media) + count($broken_link_media);
             if ($total_to_delete > 0) {
                  WP_CLI::confirm( "\nReady to delete {$total_to_delete} attachments. This is irreversible. Proceed?", $this->assoc_args );
@@ -322,7 +328,6 @@ class Media_Cleaner_Command {
             return;
         }
 
-        // Final, irreversible confirmation
         WP_CLI::warning( "You are about to permanently delete {$total_to_delete} media attachments from the media library and the server.\nThis action is IRREVERSIBLE." );
         WP_CLI::confirm( "Are you absolutely sure you want to continue?", $this->assoc_args );
 
@@ -330,23 +335,28 @@ class Media_Cleaner_Command {
         
         if(!$this->log_file) {
             $this->initialize_log_file();
-            $this->log_to_csv( ['Attachment ID', 'File Name', 'Status', 'Action Taken', 'Timestamp'] );
+            $this->log_to_csv( ['Attachment ID', 'File Name', 'Upload Folder', 'Status', 'Action Taken', 'Timestamp'] );
         }
         
         $progress = \WP_CLI\Utils\make_progress_bar( 'Deleting media', $total_to_delete );
         $deleted_count = 0;
+        
+        $upload_dir_info = wp_upload_dir();
+        $upload_base_dir = $upload_dir_info['basedir'];
 
         foreach ( $ids_to_delete as $id ) {
-            $file_name = basename( get_attached_file( $id ) );
+            $file_path = get_attached_file( $id );
+            $file_name = basename( $file_path );
             $is_broken = in_array($id, $cache_data['broken_link_media']);
+            $relative_path = $file_path ? str_replace( $upload_base_dir, '', $file_path ) : '';
+            $upload_folder = $relative_path ? ltrim( dirname( $relative_path ), '/' ) : '';
             
-            // The `true` parameter forces deletion, even if it's attached to posts.
             if ( wp_delete_attachment( $id, true ) ) {
                 $deleted_count++;
                 $status = $is_broken ? 'Broken Link' : 'Unused';
-                $this->log_to_csv([$id, $file_name, $status, 'Deleted', date('Y-m-d H:i:s')]);
+                $this->log_to_csv([$id, $file_name, $upload_folder, $status, 'Deleted', date('Y-m-d H:i:s')]);
             } else {
-                 $this->log_to_csv([$id, $file_name, 'Error', 'Deletion Failed', date('Y-m-d H:i:s')]);
+                 $this->log_to_csv([$id, $file_name, $upload_folder, 'Error', 'Deletion Failed', date('Y-m-d H:i:s')]);
                  WP_CLI::warning("Failed to delete attachment ID: {$id}");
             }
             $progress->tick();
@@ -375,7 +385,7 @@ class Media_Cleaner_Command {
 
         $attachment_url = wp_get_attachment_url( $attachment_id );
         $url_parts = parse_url($attachment_url);
-        $url_path_fragment = ltrim($url_parts['path'], '/'); // e.g. 'wp-content/uploads/2023/01/image.jpg'
+        $url_path_fragment = ltrim($url_parts['path'], '/');
 
         $file_name = basename( $file_path );
 
@@ -384,7 +394,7 @@ class Media_Cleaner_Command {
             
             switch($location_key) {
                 case 'content':
-                case 'page_builders': // Page builders often store URLs in post_content too
+                case 'page_builders':
                     $sql = $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_content LIKE %s OR post_content LIKE %s", '%' . $wpdb->esc_like( $file_name ) . '%', '%' . $wpdb->esc_like( $url_path_fragment ) . '%' );
                     if ( $wpdb->get_var( $sql ) > 0 ) return true;
                     break;
@@ -395,20 +405,17 @@ class Media_Cleaner_Command {
                     break;
                 
                 case 'meta':
-                    // This is complex. It checks for exact ID matches, and serialized data.
-                    // This is not foolproof for all serialized structures but covers many common ones (like ACF).
                     $sql = $wpdb->prepare(
                         "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE (meta_value = %s) OR (meta_value LIKE %s) OR (meta_value LIKE %s)",
                         $attachment_id,
-                        '%"' . $wpdb->esc_like( $attachment_id ) . '"%', // For JSON like {"image":"123"}
-                        '%' . $wpdb->esc_like( $file_name ) . '%' // For URLs stored in meta
+                        '%"' . $wpdb->esc_like( $attachment_id ) . '"%',
+                        '%' . $wpdb->esc_like( $file_name ) . '%'
                     );
                     if ( $wpdb->get_var( $sql ) > 0 ) return true;
                     break;
                 
                 case 'options':
-                case 'widgets': // Widgets are also stored in options table
-                    // Similar to postmeta, checks for IDs and URLs within the options table
+                case 'widgets':
                      $sql = $wpdb->prepare(
                         "SELECT COUNT(*) FROM {$wpdb->options} WHERE (option_value LIKE %s) OR (option_value LIKE %s)",
                         '%"' . $wpdb->esc_like( $attachment_id ) . '"%',
@@ -418,7 +425,6 @@ class Media_Cleaner_Command {
                     break;
                 
                 case 'woocommerce':
-                     // WooCommerce product gallery check
                     $sql = $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_product_image_gallery' AND meta_value LIKE %s", '%' . $wpdb->esc_like( $attachment_id ) . '%' );
                     if ( $wpdb->get_var( $sql ) > 0 ) return true;
                     break;
@@ -430,9 +436,6 @@ class Media_Cleaner_Command {
 
     // --- File and Logging Helpers ---
 
-    /**
-     * Initializes a new timestamped log file.
-     */
     private function initialize_log_file() {
         $this->log_file = $this->logs_dir . '/media-cleaner-log-' . date('Y-m-d-His') . '.csv';
         $this->log_file_handle = fopen( $this->log_file, 'w' );
@@ -441,20 +444,12 @@ class Media_Cleaner_Command {
         }
     }
 
-    /**
-     * Appends a row of data to the current CSV log file.
-     *
-     * @param array $row The data to write to the CSV.
-     */
     private function log_to_csv( $row ) {
         if ( $this->log_file_handle ) {
             fputcsv( $this->log_file_handle, $row );
         }
     }
 
-    /**
-     * Closes the log file handle.
-     */
     private function close_log_file() {
         if ( $this->log_file_handle ) {
             fclose( $this->log_file_handle );
@@ -462,17 +457,11 @@ class Media_Cleaner_Command {
         }
     }
 
-    /**
-     * Finds the most recent cache file in the cache directory.
-     *
-     * @return string|null The path to the latest cache file, or null if none found.
-     */
     private function find_latest_cache_file() {
         $files = glob( $this->cache_dir . '/media-cleaner-cache-*.json' );
         if ( ! $files ) {
             return null;
         }
-        // Sort files by modified time, newest first
         usort( $files, function ( $a, $b ) {
             return filemtime( $b ) - filemtime( $a );
         } );
@@ -480,5 +469,4 @@ class Media_Cleaner_Command {
     }
 }
 
-// Register the command with WP-CLI
 WP_CLI::add_command( 'media-cleaner', 'Media_Cleaner_Command' );
