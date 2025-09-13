@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Media Cleaner CLI
  * Description:       A WP-CLI command to find and clean up unused media and media with broken file links. This plugin was developed with the assistance of Gemini.
- * Version:           1.0.3
+ * Version:           1.0.4
  * Author:            Triple Dub
  * Author URI:        https://tripledub.media
  * License:           GPL-2.0-or-later
@@ -107,13 +107,14 @@ class Media_Cleaner_Command {
             return;
         }
 
-        WP_CLI::line( WP_CLI::colorize( '%CWelcome to the Media Cleaner!%n' ) );
-
         $is_dry_run = isset( $this->assoc_args['dry-run'] );
         
         // --- Cache Handling ---
         $latest_cache_file = $this->find_latest_cache_file();
+        fwrite(STDERR, "DEBUG: latest_cache_file = " . ($latest_cache_file ? $latest_cache_file : 'null') . "\n");
+        
         if ( ! $is_dry_run && ! isset($this->assoc_args['skip-cache']) && $latest_cache_file ) {
+            fwrite(STDERR, "DEBUG: Using cache file path\n");
             $cache_data = json_decode( file_get_contents( $latest_cache_file ), true );
             $cache_time = filemtime( $latest_cache_file );
             $time_ago = human_time_diff($cache_time, time()) . ' ago';
@@ -128,6 +129,8 @@ class Media_Cleaner_Command {
             $this->perform_deletion( $cache_data );
             return;
         }
+        
+        fwrite(STDERR, "DEBUG: Not using cache, proceeding to location selection\n");
 
         // --- Interactive Location Selection ---
         if ( ! $this->prompt_for_search_locations() ) {
@@ -162,28 +165,35 @@ class Media_Cleaner_Command {
         return true;
     }
 
-    /**
+	/**
      * Prompts the user to select which locations to scan for media usage.
      *
      * @return bool True if locations were selected, false if aborted.
      */
     private function prompt_for_search_locations() {
-        WP_CLI::line( "\nBefore we scan, please specify where we should look for media usage." );
-        WP_CLI::line( "This helps to ensure we don't accidentally mark a file as 'unused'." );
+
+		fwrite(STDOUT, "\nBefore we scan, please specify where we should look for media usage.\n");
+		fwrite(STDOUT, "This helps to ensure we don't accidentally mark a file as 'unused'.\n");
         
         WP_CLI::line( "\n--- Search Locations Legend ---" );
         foreach( self::LOCATIONS as $num => $details ) {
-            WP_CLI::line( "[$num] {$details['label']}" );
+            //WP_CLI::line( "[$num] {$details['label']}" );
+			fwrite(STDOUT, "[$num] {$details['label']}\n");
         }
         WP_CLI::line( "-------------------------------" );
 
         $question = "Indicate the locations to search, separated by commas (e.g., 1,2,3,6):";
         
-        // Force flush the output buffer before readline
-        fflush(STDOUT);
-
         while(true) {
-            $input = readline($question . " ");
+            // Display the question before asking for input
+            fwrite(STDERR, "$question\n");
+            if (function_exists('readline')) {
+                $input = readline('> ');
+            } else {
+                // For systems without readline, we need to show our own prompt
+                echo '> ';
+                $input = rtrim(fgets(STDIN), "\r\n");
+            }
             $input = trim($input);
 
             if (empty($input)) {
@@ -208,7 +218,7 @@ class Media_Cleaner_Command {
             if (!$invalid_found) {
                 $this->search_locations = array_unique($valid_choices);
                 $selected_labels = array_map(function($c) { return self::LOCATIONS[$c]['label']; }, $this->search_locations);
-                WP_CLI::line("\nExcellent. We will search in: " . implode(', ', $selected_labels));
+				fwrite(STDOUT, "\nWe will search in:" . implode(', ', $selected_labels));
                 return true;
             }
         }
@@ -274,7 +284,8 @@ class Media_Cleaner_Command {
                 } else {
                     $unused_media[] = $id;
                     $action = $is_dry_run ? 'Skipped (Dry Run)' : 'To Be Deleted';
-                    $this->log_to_csv( [$id, $file_name, $upload_folder, 'Unused', 'action', date('Y-m-d H:i:s')] );
+                    // FIXED: Changed 'action' to $action variable
+                    $this->log_to_csv( [$id, $file_name, $upload_folder, 'Unused', $action, date('Y-m-d H:i:s')] );
                 }
             }
             $progress->tick();
